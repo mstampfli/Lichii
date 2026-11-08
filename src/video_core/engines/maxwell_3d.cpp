@@ -1645,54 +1645,14 @@ bool Maxwell3D::FrontContiguous(GPUVAddr address, u64 size, u64 device) const {
 
 bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
                                    u32 method, GPUVAddr source, u32 words) {
-    // Without draining the back, for reads of report memory only (pages 3D reports and
-    // semaphore releases write, such as occlusion results): the words in guest memory, with the
-    // queued writes the front knows the words of on top (fence releases, inline uploads), once
-    // the back ran the queued writes it doesn't know that overlap the read. Other memory may be
-    // written by queued draws or dispatches the front doesn't track; pages GPU shaders or copies
-    // wrote, and counter reports whose host query hasn't completed, take the drained path too.
+    // Without draining the back, for reads of report memory only (such as occlusion results).
     const size_t read_bytes = size_t{words} * sizeof(u32);
-    if (words == 0) {
-        return false;
-    }
-    const auto device = memory_manager.GpuToCpuAddress(source);
-    if (!device || !split.IsReportMemory(*device, read_bytes)) {
-        return false;
-    }
-    // Queued compute and copy work can write any page, and the back marks the pages GPU-written
-    // only once it runs it.
-    split.WaitForWriters(VideoCommon::DrainSite::MacroDmaRead);
-    // Every page where a contiguous device range puts it: the queued-write checks look at
-    // [*device, *device + read_bytes).
-    for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
-        const GPUVAddr at = (std::max)(page, source);
-        const auto page_device = memory_manager.GpuToCpuAddress(at);
-        if (!page_device || *page_device != *device + (at - source) ||
-            Tegra::Nx2IsGpuWritten(*page_device)) {
-            return false;
-        }
-    }
-    if (const u64 async_position = split.HasAsyncWrite(*device, read_bytes);
-        async_position != 0 && (async_position > split.ConsumedNow() ||
-                                !Tegra::Nx2AsyncReportsSettled(*device, read_bytes))) {
-        return false;
-    }
     thread_local std::vector<u32> fast;
     fast.resize(words);
-    const u64 since = split.ConsumedNow();
-    // A fence release the back already ran lands when its host fence signals; one still queued
-    // is overlaid below.
-    if (const u64 fence_position = split.HasFenceWrite(*device, read_bytes);
-        fence_position != 0 && fence_position <= since &&
-        !Tegra::Nx2AsyncReportsSettled(*device, read_bytes)) {
+    if (!split.ReadQueuedWords(memory_manager, source, fast.data(), words,
+                               VideoCommon::GpuSplit::QueuedRead::Ordered,
+                               VideoCommon::DrainSite::MacroDmaRead)) {
         return false;
-    }
-    memory_manager.ReadBlockUnsafe(source, fast.data(), read_bytes);
-    if (!split.OverlayQueuedWrites(since, *device, fast.data(), words)) {
-        if (!split.WaitForWritesTo(*device, read_bytes)) {
-            return false;
-        }
-        memory_manager.ReadBlockUnsafe(source, fast.data(), read_bytes);
     }
     // EDEN_NX2_DMA_READ_CHECK=1: also drain, read again and log reads that differ.
     static const bool check = std::getenv("EDEN_NX2_DMA_READ_CHECK") != nullptr;

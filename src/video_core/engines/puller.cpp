@@ -65,6 +65,23 @@ void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
 
+// The semaphore word with the releases queued for the split's back on top, when its front can
+// know it without draining (GpuSplit::ReadQueuedWords). An acquire it meets doesn't wait: the back
+// runs those releases before anything the channel sends after the acquire. The read may come
+// before queued draws and dispatches ran: the GPU's host interface doesn't wait for the engines'
+// earlier work at an acquire either.
+std::optional<u32> ReadSemaphoreWordQueued(DmaPusher& dma_pusher, GPUVAddr address) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    u32 word;
+    if (!split.Active() ||
+        !split.ReadQueuedWords(dma_pusher.memory_manager, address, &word, 1,
+                               VideoCommon::GpuSplit::QueuedRead::Unordered,
+                               VideoCommon::DrainSite::Acquire)) {
+        return std::nullopt;
+    }
+    return word;
+}
+
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
 // the back's state, which a drained back still uses from its idle hook (it submits).
 void ReleaseFences(DmaPusher& dma_pusher) {
@@ -90,6 +107,10 @@ bool Puller::PendingAcquire::Matches(u32 current) const {
 
 bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
+        return true;
+    }
+    if (const auto word = ReadSemaphoreWordQueued(dma_pusher, pending_acquire->address);
+        word && pending_acquire->Matches(*word)) {
         return true;
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
@@ -276,6 +297,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        if (const auto word = ReadSemaphoreWordQueued(dma_pusher, acquire.address);
+            word && acquire.Matches(*word)) {
+            return;
+        }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;

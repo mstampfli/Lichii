@@ -20,6 +20,10 @@ namespace Core {
 class System;
 }
 
+namespace Tegra {
+class MemoryManager;
+}
+
 namespace Tegra::Engines {
 class EngineInterface;
 }
@@ -214,6 +218,21 @@ public:
     /// Waits until the back executed the noted writes that overlap [begin, begin + size).
     /// Returns false when more writes are queued than are remembered (the caller drains).
     bool WaitForWritesTo(u64 begin, u64 size);
+    /// How ReadQueuedWords orders the read against queued work the front doesn't track.
+    enum class QueuedRead {
+        /// After it, as a drain would (a macro DMA read): report memory only, the pages 3D reports
+        /// and semaphore releases write, which draws and dispatches don't; queued compute and copy
+        /// work runs first, since the back marks the pages it writes only once it ran it.
+        Ordered,
+        /// Possibly before it (a semaphore acquire, which the GPU's host interface runs without
+        /// waiting for the engines' earlier work either): any page no GPU work has written.
+        Unordered,
+    };
+    /// Front: reads the `words` words at `source` without draining the back: guest memory with
+    /// the queued writes the front knows the words of on top, once the back ran the overlapping
+    /// ones it doesn't know. False when the words can't be known that way (the caller drains).
+    bool ReadQueuedWords(Tegra::MemoryManager& memory_manager, u64 source, u32* out, u32 words,
+                         QueuedRead order, DrainSite site);
     /// Front: a write that lands when a host query completes or a fence signals (counter
     /// reports, timed releases), not when the back runs it (Tegra::Nx2AsyncReportsSettled).
     void NoteAsyncWrite(u64 begin, u64 size) {

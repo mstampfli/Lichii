@@ -253,6 +253,61 @@ bool GpuSplit::WaitForWritesTo(u64 begin, u64 size) {
     return true;
 }
 
+bool GpuSplit::ReadQueuedWords(Tegra::MemoryManager& memory_manager, u64 source, u32* out,
+                               u32 words, QueuedRead order, DrainSite site) {
+    // Pages GPU shaders or copies wrote (their words may be newer in the caches), and counter
+    // reports whose host query hasn't completed, take the drained path.
+    const size_t read_bytes = size_t{words} * sizeof(u32);
+    if (words == 0) {
+        return false;
+    }
+    const auto device = memory_manager.GpuToCpuAddress(source);
+    if (!device) {
+        return false;
+    }
+    if (order == QueuedRead::Ordered) {
+        // Other memory may be written by queued draws or dispatches the front doesn't track.
+        if (!IsReportMemory(*device, read_bytes)) {
+            return false;
+        }
+        // Queued compute and copy work can write any page, and the back marks the pages
+        // GPU-written only once it runs it. An unordered read may see the words from before it:
+        // a page it hasn't marked yet holds no newer words elsewhere.
+        WaitForWriters(site);
+    }
+    // Every page where a contiguous device range puts it: the queued-write checks look at
+    // [*device, *device + read_bytes).
+    for (u64 page = source & ~u64{0xfff}; page < source + read_bytes; page += 0x1000) {
+        const u64 at = (std::max)(page, source);
+        const auto page_device = memory_manager.GpuToCpuAddress(at);
+        if (!page_device || *page_device != *device + (at - source) ||
+            Tegra::Nx2IsGpuWritten(*page_device)) {
+            return false;
+        }
+    }
+    if (const u64 async_position = HasAsyncWrite(*device, read_bytes);
+        async_position != 0 && (async_position > ConsumedNow() ||
+                                !Tegra::Nx2AsyncReportsSettled(*device, read_bytes))) {
+        return false;
+    }
+    const u64 since = ConsumedNow();
+    // A fence release the back already ran lands when its host fence signals; one still queued
+    // is overlaid below.
+    if (const u64 fence_position = HasFenceWrite(*device, read_bytes);
+        fence_position != 0 && fence_position <= since &&
+        !Tegra::Nx2AsyncReportsSettled(*device, read_bytes)) {
+        return false;
+    }
+    memory_manager.ReadBlockUnsafe(source, out, read_bytes);
+    if (!OverlayQueuedWrites(since, *device, out, words)) {
+        if (!WaitForWritesTo(*device, read_bytes)) {
+            return false;
+        }
+        memory_manager.ReadBlockUnsafe(source, out, read_bytes);
+    }
+    return true;
+}
+
 bool GpuSplit::OverlayQueuedWrites(u64 since, u64 begin, u32* out, u32 words) {
     if ((begin & 3) != 0) {
         return false;

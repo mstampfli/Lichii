@@ -146,6 +146,11 @@ TEST_CASE("Debug server rejections drop matching native programs", "[shader_inva
     cache->RefreshDebugRejections(undo->unrejected);
     REQUIRE_FALSE(ShaderCacheTestAccess::IsRejected(*cache, earlier));
     REQUIRE(VideoCore::Nx2Debug::RejectedHashes() == std::vector<u64>{0x22});
+    // The rejections are process-wide and EndSession keeps them: lift the last one, or the
+    // tests that run after this one see a rejected hash (Nx2Debug::AnyRejected).
+    const std::array<u64, 1> last{0x22};
+    VideoCore::Nx2Debug::SetRejected(last, false);
+    REQUIRE_FALSE(VideoCore::Nx2Debug::AnyRejected());
     VideoCore::Nx2Debug::EndSession();
 }
 

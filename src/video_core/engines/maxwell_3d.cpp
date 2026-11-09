@@ -1896,7 +1896,7 @@ void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, const FrontState& 
     if (fs.draw_pending) {
         // A draw, or one an instance loop deferred to this entry (ProcessDirtyRegisters): where
         // its shaders store, and what the caches download for it, only the back knows.
-        split.NoteAnyWrite();
+        split.NoteAnyWrite(true);
         return;
     }
     if (method >= cb_data && method < cb_data + 16) {

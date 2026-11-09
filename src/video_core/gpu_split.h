@@ -326,8 +326,11 @@ public:
     /// The entry just sent (Writes::Noted) writes [address, address + size) of `memory`.
     void NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
     /// The entry just sent may write guest memory anywhere.
-    void NoteAnyWrite() {
+    void NoteAnyWrite(bool draw = false) {
         last_any_write = write_position;
+        if (!draw) {
+            last_other_any_write = write_position; // PROBE: relaxed acquires ignore draws
+        }
     }
     /// Waits until the back executed every entry sent so far that can write guest memory in
     /// [address, address + size) of `memory`, not the others. Returns whether one was queued.
@@ -454,6 +457,7 @@ private:
     /// After the last entry that may write guest memory anywhere (NoteAnyWrite), the last one
     /// NoteWrite placed, and the last placed write in each slot's granules.
     u64 last_any_write{};
+    u64 last_other_any_write{}; ///< PROBE: last_any_write without draws
     u64 last_noted_write{};
     std::array<u64, size_t{1} << WriteSlotBits> write_positions{};
     u64 published_local{};

@@ -151,6 +151,7 @@ void GpuSplit::Stop() {
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
     last_any_write = 0;
+    last_other_any_write = 0;
     last_noted_write = 0;
     write_positions.fill(0);
     published_local = 0;
@@ -280,7 +281,10 @@ std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
 }
 
 bool GpuSplit::OtherWritesQueued(u64 device_address, u64 size) const {
-    const u64 target = std::max(last_any_write, DeviceWritesTarget(device_address, size));
+    // PROBE EDEN_PROBE_ACQ_RELAXED=1: a queued draw is taken not to write semaphore words.
+    static const bool relaxed = std::getenv("EDEN_PROBE_ACQ_RELAXED") != nullptr;
+    const u64 any = relaxed ? last_other_any_write : last_any_write;
+    const u64 target = std::max(any, DeviceWritesTarget(device_address, size));
     return target > consumed.load(std::memory_order_acquire);
 }
 

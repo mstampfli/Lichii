@@ -34,6 +34,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/flush_probe.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
@@ -2366,6 +2367,9 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
         texture_area = texture_cache.GetFlushArea(addr, size);
     }
     if (texture_area) {
+        if (!texture_area->preemtive) {
+            VideoCommon::FlushProbe::Set(VideoCommon::FlushProbe::Reason::Texture);
+        }
         // The core disarmed the read's pages before asking, and skips later reads in this area,
         // even through another device alias of those pages. The buffer cache arms only pages it
         // doesn't count as armed, so it must forget the whole area.

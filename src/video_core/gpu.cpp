@@ -10,9 +10,13 @@
 #include <condition_variable>
 #include <list>
 #include <memory>
+#include <string>
 #include <utility>
 
+#include <fmt/format.h>
+
 #include "common/assert.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
@@ -32,6 +36,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/maxwell_dma.h"
+#include "video_core/flush_probe.h"
 #include "video_core/gpu.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
@@ -247,22 +252,47 @@ struct GPU::Impl {
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
+        namespace Probe = VideoCommon::FlushProbe;
         auto* const rasterizer = renderer->ReadRasterizer();
+        Probe::Set(Probe::Reason::None);
         auto raster_area = rasterizer->GetFlushArea(addr, size);
+        Probe::reads.fetch_add(1, std::memory_order_relaxed);
+        ReportFlushProbe();
         // GPU data on its way with a fence: wait for it rather than read guest memory before it
         // lands, then look again (the GPU may have written the range since).
-        for (u32 waits = 0; raster_area.wait_downloads && waits < 8; ++waits) {
-            rasterizer->WaitForPendingDownloads(raster_area.start_address,
-                                                raster_area.end_address - raster_area.start_address);
-            raster_area = rasterizer->GetFlushArea(addr, size);
+        if (raster_area.wait_downloads) {
+            const auto wait_start = std::chrono::steady_clock::now();
+            for (u32 waits = 0; raster_area.wait_downloads && waits < 8; ++waits) {
+                rasterizer->WaitForPendingDownloads(
+                    raster_area.start_address, raster_area.end_address - raster_area.start_address);
+                Probe::Set(Probe::Reason::None);
+                raster_area = rasterizer->GetFlushArea(addr, size);
+            }
+            Probe::waits.fetch_add(1, std::memory_order_relaxed);
+            Probe::wait_ns.fetch_add(static_cast<u64>(std::chrono::duration_cast<
+                                         std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now() - wait_start)
+                                         .count()),
+                                     std::memory_order_relaxed);
         }
         if (raster_area.wait_downloads) {
             // Still downloading after the waits: flush it like data not queued yet.
             raster_area.preemtive = false;
+            Probe::Set(Probe::Reason::WaitTimeout);
         }
         if (raster_area.preemtive) {
             return raster_area;
         }
+        const auto reason = static_cast<size_t>(Probe::t_reason);
+        const auto flush_start = std::chrono::steady_clock::now();
+        SCOPE_EXIT {
+            Probe::flushes[reason].fetch_add(1, std::memory_order_relaxed);
+            Probe::flush_ns[reason].fetch_add(
+                static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - flush_start)
+                                     .count()),
+                std::memory_order_relaxed);
+        };
         raster_area.preemtive = true;
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
         // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
@@ -279,6 +309,38 @@ struct GPU::Impl {
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
         return raster_area;
+    }
+
+    /// FLUSHPROBE: every 10 s, the reads of GPU-written memory, the waits for downloads and the
+    /// flushes by the branch that decided them, with the time the reading cores spent in each.
+    static void ReportFlushProbe() {
+        namespace Probe = VideoCommon::FlushProbe;
+        static std::atomic<s64> last{};
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        s64 prev = last.load(std::memory_order_relaxed);
+        if (prev == 0) {
+            last.store(now, std::memory_order_relaxed);
+            return;
+        }
+        if (now - prev < 10'000'000'000LL || !last.compare_exchange_strong(prev, now)) {
+            return;
+        }
+        std::string line;
+        u64 total = 0;
+        u64 total_ns = 0;
+        for (size_t i = 0; i < Probe::flushes.size(); ++i) {
+            const u64 n = Probe::flushes[i].exchange(0, std::memory_order_relaxed);
+            const u64 ns = Probe::flush_ns[i].exchange(0, std::memory_order_relaxed);
+            total += n;
+            total_ns += ns;
+            if (n != 0) {
+                line += fmt::format(" | {} {} ({:.1f} ms)", Probe::names[i], n, ns / 1e6);
+            }
+        }
+        LOG_INFO(HW_GPU,
+                 "FLUSHPROBE per 10 s: reads {}, waits {} ({:.1f} ms), flushes {} ({:.1f} ms){}",
+                 Probe::reads.exchange(0), Probe::waits.exchange(0), Probe::wait_ns.exchange(0) / 1e6,
+                 total, total_ns / 1e6, line);
     }
 
     /// Notify rasterizer that any caches of the specified region should be invalidated

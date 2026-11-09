@@ -7,6 +7,7 @@
 #pragma once
 
 #include "video_core/buffer_cache/uniform_cache_history.h"
+#include "video_core/flush_probe.h"
 
 #include <algorithm>
 #include <atomic>
@@ -300,6 +301,14 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
             const auto queued = [&](const Common::RangeSet<DAddr>& ranges) {
                 return ranges.Intersects(device_addr_start_aligned, aligned_size);
             };
+            using VideoCommon::FlushProbe::Reason;
+            if (queued(uncommitted_gpu_modified_ranges)) {
+                VideoCommon::FlushProbe::Set(Reason::Uncommitted);
+            } else if (std::ranges::any_of(committed_gpu_modified_ranges, queued)) {
+                VideoCommon::FlushProbe::Set(Reason::Committed);
+            } else if (!IsDownloadInFlight(device_addr_start_aligned, aligned_size)) {
+                VideoCommon::FlushProbe::Set(Reason::NoDownload);
+            }
             if (queued(uncommitted_gpu_modified_ranges) ||
                 std::ranges::any_of(committed_gpu_modified_ranges, queued) ||
                 !IsDownloadInFlight(device_addr_start_aligned, aligned_size)) {
@@ -324,6 +333,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     // being skipped by the deduplication cache, also once the read marks the page Preflushable.
     read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
     if (!area->preemtive) {
+        VideoCommon::FlushProbe::Set(VideoCommon::FlushProbe::Reason::FirstRead);
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned, aligned_size, preflush);
         }

@@ -110,17 +110,15 @@ enum class AcquireCheck {
     Drain,       ///< Drain the split and read the word as before
 };
 
-// Checks a greater-or-equal acquire without draining the split. The words Switch 2 syncs on only
-// advance (NVN2 even releases QMD completions as maxima, KeplerCompute::ProcessNativeMethod), so
-// a value that meets one now still does once the back ran the queued work. Only the last release
-// the front sent to the word decides instead, when the back may not have run it yet.
+// Checks an acquire without draining the split. The words Switch 2 syncs on only advance (NVN2
+// even releases QMD completions as maxima, KeplerCompute::ProcessNativeMethod), so a value that
+// meets a greater-or-equal acquire now still does once the back ran the queued work. Only the last
+// release the front sent to the word decides instead, when the back may not have run it yet.
+// An equal or mask acquire can stop being met by any write that advances the word: it is decided
+// the same way only while the back has no other write queued that may reach the word.
 AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire) {
     auto& split = VideoCommon::GpuSplit::Get();
     auto& stats = VideoCommon::g_acquire_stats;
-    if (!acquire.WaitsToReach()) {
-        VideoCommon::Count(stats.drain_operation);
-        return AcquireCheck::Drain;
-    }
     if (!split.Active() || !split.FrontMacros() || !ReleasesLandAtOnce()) {
         VideoCommon::Count(stats.drain_settings);
         return AcquireCheck::Drain;
@@ -129,6 +127,10 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
     // A word the buffer cache may hold newer than memory is read through the back.
     if (!device || Nx2MayBeGpuWritten(*device, sizeof(u32))) {
         VideoCommon::Count(stats.drain_word);
+        return AcquireCheck::Drain;
+    }
+    if (!acquire.WaitsToReach() && split.OtherWritesQueued(*device, sizeof(u32))) {
+        VideoCommon::Count(stats.drain_operation);
         return AcquireCheck::Drain;
     }
     if (const auto queued = split.QueuedSemaphoreWriteAt(*device)) {

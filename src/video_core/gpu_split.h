@@ -314,6 +314,10 @@ public:
     /// it yet.
     [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
         u64 device_address) const;
+    /// Whether the back may still run an entry that writes [device_address, device_address +
+    /// size) other than a semaphore release: a noted write there (NoteWrite) or one that may
+    /// write anywhere (NoteAnyWrite) that it has not consumed yet.
+    [[nodiscard]] bool OtherWritesQueued(u64 device_address, u64 size) const;
     /// Waits until the back executed the compute and copy work sent before the last NoteSync:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
     /// still queued.

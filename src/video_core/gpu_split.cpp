@@ -279,6 +279,11 @@ std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
     return QueuedSemaphoreWrite{it->second.payload, it->second.known};
 }
 
+bool GpuSplit::OtherWritesQueued(u64 device_address, u64 size) const {
+    const u64 target = std::max(last_any_write, DeviceWritesTarget(device_address, size));
+    return target > consumed.load(std::memory_order_acquire);
+}
+
 namespace {
 
 /// Calls `func(device_address, size)` for each mapped piece of [address, address + size) within

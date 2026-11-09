@@ -93,6 +93,16 @@ struct GpuSplitTestAccess {
         return split.WritesTarget(memory, address, size);
     }
 
+    /// The front sent entries up to `position`; the back consumed up to `consumed`.
+    static void SetPositions(GpuSplit& split, u64 position, u64 consumed) {
+        split.write_position = position;
+        split.consumed.store(consumed);
+    }
+
+    static void NoteDeviceWrite(GpuSplit& split, DAddr address, u64 size) {
+        split.NoteDeviceWrite(address, size);
+    }
+
     /// Whether writes to two device addresses share a slot of the noted write positions.
     static bool ShareWriteSlot(DAddr a, DAddr b) {
         return GpuSplit::WriteSlot(a >> GpuSplit::WriteGranuleBits) ==
@@ -666,6 +676,36 @@ TEST_CASE("GpuSplit CB batching preserves words at the GPU address space end",
         REQUIRE(engine->regs.const_buffer.offset == 8);
     }
     f.Compare();
+}
+
+TEST_CASE("GpuSplit knows when a queued write other than a release may reach a word",
+          "[video_core][gpu_split]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    VideoCommon::GpuSplit split;
+    constexpr DAddr word = 0x12340;
+    DAddr elsewhere = word + 0x1000;
+    while (Access::ShareWriteSlot(word, elsewhere)) {
+        elsewhere += 0x100;
+    }
+    Access::SetPositions(split, 10, 10);
+    REQUIRE_FALSE(split.OtherWritesQueued(word, sizeof(u32)));
+
+    // A write noted to the word's granule (the entry just sent ends at 20), until the back
+    // consumed it.
+    Access::SetPositions(split, 20, 10);
+    Access::NoteDeviceWrite(split, word - 0x10, 0x20);
+    REQUIRE(split.OtherWritesQueued(word, sizeof(u32)));
+    REQUIRE_FALSE(split.OtherWritesQueued(elsewhere, sizeof(u32)));
+    Access::SetPositions(split, 20, 20);
+    REQUIRE_FALSE(split.OtherWritesQueued(word, sizeof(u32)));
+
+    // An entry that may write anywhere (a draw, a swizzled upload) reaches every word.
+    Access::SetPositions(split, 30, 25);
+    split.NoteAnyWrite();
+    REQUIRE(split.OtherWritesQueued(word, sizeof(u32)));
+    REQUIRE(split.OtherWritesQueued(elsewhere, sizeof(u32)));
+    Access::SetPositions(split, 30, 30);
+    REQUIRE_FALSE(split.OtherWritesQueued(elsewhere, sizeof(u32)));
 }
 
 TEST_CASE("Maxwell3D fast method dispatch cost", "[.][maxwell_fast_method_bench]") {

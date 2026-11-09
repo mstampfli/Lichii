@@ -333,7 +333,26 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     // being skipped by the deduplication cache, also once the read marks the page Preflushable.
     read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
     if (!area->preemtive) {
-        VideoCommon::FlushProbe::Set(VideoCommon::FlushProbe::Reason::FirstRead);
+        {
+            // FLUSHPROBE: was a page of this read marked before (mark lost since), or is a page
+            // next to the range marked already (a buffer the GPU writes page after page)?
+            namespace Probe = VideoCommon::FlushProbe;
+            constexpr DAddr page = Core::DEVICE_PAGESIZE;
+            bool again = false;
+            for (DAddr p = device_addr_start_aligned; p < device_addr_end_aligned; p += page) {
+                again |= Probe::g_ever_marked.contains(p);
+            }
+            const bool neighbor =
+                (device_addr_start_aligned >= page &&
+                 memory_tracker.IsRegionPreflushable(device_addr_start_aligned - page, page)) ||
+                memory_tracker.IsRegionPreflushable(device_addr_end_aligned, page);
+            Probe::Set(again      ? Probe::Reason::FirstReadAgain
+                       : neighbor ? Probe::Reason::FirstReadNeighbor
+                                  : Probe::Reason::FirstRead);
+            for (DAddr p = device_addr_start_aligned; p < device_addr_end_aligned; p += page) {
+                Probe::g_ever_marked.insert(p);
+            }
+        }
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned, aligned_size, preflush);
         }

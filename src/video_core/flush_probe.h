@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <unordered_set>
 
 #include "common/common_types.h"
 
@@ -18,7 +19,9 @@ namespace VideoCommon::FlushProbe {
 enum class Reason : u8 {
     None,
     Texture,     ///< The texture cache holds GPU data there (its area comes first)
-    FirstRead,   ///< Not preflushable yet: the read marks it and flushes
+    FirstRead,   ///< Not preflushable yet, never marked before, no marked neighbour page
+    FirstReadAgain,    ///< Not preflushable now, but this page was marked before (mark lost)
+    FirstReadNeighbor, ///< Not preflushable yet, but a page next to it is
     Uncommitted, ///< Preflushable, GPU writes not committed to a fence yet
     Committed,   ///< Preflushable, committed but not downloading yet
     NoDownload,  ///< Preflushable and GPU-modified, no download in flight
@@ -27,9 +30,13 @@ enum class Reason : u8 {
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> names{
-    "none", "texture cache", "first read", "uncommitted writes", "committed, not downloading",
+    "none", "texture cache", "first read (new)", "first read (mark lost)",
+    "first read (next to a marked page)", "uncommitted writes", "committed, not downloading",
     "no download in flight", "wait timed out",
 };
+
+/// Pages a first read has ever marked Preflushable (under the buffer cache mutex).
+inline std::unordered_set<u64> g_ever_marked;
 
 inline thread_local Reason t_reason{};
 

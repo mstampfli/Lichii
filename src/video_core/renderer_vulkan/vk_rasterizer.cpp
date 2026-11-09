@@ -14,6 +14,9 @@
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include <filesystem>
 #include <tuple>
 #include <set>
@@ -435,8 +438,81 @@ RasterizerVulkan::~RasterizerVulkan() {
     scheduler.Finish();
 }
 
+namespace {
+// BREAKSET probe (not for merging): for full draws after a state change, every break since the
+// previous draw. Combinations (sorted, as text) and each break's share, logged every 10 s.
+struct BreakSetProbe {
+    std::unordered_map<std::string, u64> combos;
+    std::unordered_map<u32, u64> members;
+    u64 draws{};
+    u64 many{};
+};
+BreakSetProbe g_break_sets;
+
+std::string BreakName(u32 key) {
+    const u32 reason = key & 0xff;
+    const u32 method = key >> 8;
+    if (reason == static_cast<u32>(VideoCommon::Nx2FastDraw::Reason::Register) ||
+        reason == static_cast<u32>(VideoCommon::Nx2FastDraw::Reason::Method)) {
+        return fmt::format("{}{:#x}", reason == static_cast<u32>(VideoCommon::Nx2FastDraw::Reason::Method) ? "m" : "r", method);
+    }
+    return fmt::format("reason{}", reason);
+}
+
+void NoteBreakSet() {
+    namespace FastDraw = VideoCommon::Nx2FastDraw;
+    const u32 count = FastDraw::g_probe_count;
+    ++g_break_sets.draws;
+    if (count > FastDraw::g_probe_breaks.size()) {
+        ++g_break_sets.many;
+        return;
+    }
+    std::vector<u32> keys(FastDraw::g_probe_breaks.begin(), FastDraw::g_probe_breaks.begin() + count);
+    std::ranges::sort(keys);
+    std::string combo;
+    for (const u32 key : keys) {
+        combo += BreakName(key);
+        combo += ' ';
+        ++g_break_sets.members[key];
+    }
+    ++g_break_sets.combos[combo];
+}
+
+void ReportBreakSets(double seconds) {
+    if (g_break_sets.draws == 0) {
+        return;
+    }
+    std::vector<std::pair<u64, std::string>> combos;
+    for (const auto& [combo, n] : g_break_sets.combos) {
+        combos.emplace_back(n, combo);
+    }
+    std::ranges::sort(combos, std::greater{});
+    std::vector<std::pair<u64, u32>> members;
+    for (const auto& [key, n] : g_break_sets.members) {
+        members.emplace_back(n, key);
+    }
+    std::ranges::sort(members, std::greater{});
+    std::string member_text;
+    for (size_t i = 0; i < std::min<size_t>(members.size(), 16); ++i) {
+        member_text += fmt::format(" {}:{:.0f}", BreakName(members[i].second),
+                                   static_cast<double>(members[i].first) / seconds);
+    }
+    LOG_INFO(Render_Vulkan, "BREAKSET {:.0f} state-changed draws/s ({:.0f} with >24 breaks) | in the set:{}",
+             static_cast<double>(g_break_sets.draws) / seconds,
+             static_cast<double>(g_break_sets.many) / seconds, member_text);
+    for (size_t i = 0; i < std::min<size_t>(combos.size(), 10); ++i) {
+        LOG_INFO(Render_Vulkan, "BREAKSET {:7.0f}/s  {}", static_cast<double>(combos[i].first) / seconds,
+                 combos[i].second);
+    }
+    g_break_sets = BreakSetProbe{};
+}
+} // namespace
+
 GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_indirect) {
     namespace FastDraw = VideoCommon::Nx2FastDraw;
+    SCOPE_EXIT {
+        FastDraw::g_probe_count = 0;
+    };
     const ReusableDraw draw = std::exchange(reusable_draw, ReusableDraw{});
     const FastDraw::Delta delta = std::exchange(FastDraw::g_delta, FastDraw::Delta{});
     taken_delta = delta;
@@ -459,6 +535,7 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
         if (const u32 method = last_break >> 8; method < Maxwell::NUM_REGS) {
             ++fast_draw_stats.break_methods[method];
         }
+        NoteBreakSet();
         return full(FullDraw::StateChanged);
     }
     if (draw.map_serial != gpu_memory->MapSerial()) {
@@ -659,6 +736,7 @@ void RasterizerVulkan::ReportFastDraws() {
     }
     LOG_INFO(Render_Vulkan, "Fast draw state changes per second by last break:{} | by method:{}",
              breaks, top);
+    ReportBreakSets(seconds);
     stats = FastDrawStats{.window_start = now};
 }
 

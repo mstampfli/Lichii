@@ -86,10 +86,25 @@ inline std::atomic<u64> g_serial{1};
 /// The last break's reason and, for Register and Method, its 3D method (diagnostics).
 inline std::atomic<u32> g_last_break{};
 
+/// BREAKSET probe (not for merging): every break since the last draw, as reason | method << 8.
+inline std::array<u32, 24> g_probe_breaks{};
+inline u32 g_probe_count{};
+
 inline void Break(Reason reason, u32 method = 0) {
     if (Enabled()) {
         g_serial.fetch_add(1, std::memory_order_relaxed);
         g_last_break.store(static_cast<u32>(reason) | (method << 8), std::memory_order_relaxed);
+        const u32 key = static_cast<u32>(reason) | (method << 8);
+        bool seen = false;
+        for (u32 i = 0; i < g_probe_count && i < g_probe_breaks.size(); ++i) {
+            seen |= g_probe_breaks[i] == key;
+        }
+        if (!seen) {
+            if (g_probe_count < g_probe_breaks.size()) {
+                g_probe_breaks[g_probe_count] = key;
+            }
+            ++g_probe_count;
+        }
     }
 }
 

@@ -2896,6 +2896,46 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                  static_cast<u32>(info.format), info.block.width, info.block.height, info.block.depth);
     }
     const ImageId image_id = JoinImages(storage_info, gpu_addr, *cpu_addr);
+    {
+        // TEXCHURN probe (not for merging): which images are created, every 10 s the top ones.
+        struct Key {
+            GPUVAddr addr;
+            u32 format, width, height, depth, levels, type, samples, tiling;
+            bool operator==(const Key&) const = default;
+        };
+        struct KeyHash {
+            size_t operator()(const Key& k) const noexcept {
+                return std::hash<u64>{}(k.addr ^ (u64{k.format} << 40) ^ (u64{k.width} << 20) ^
+                                        k.height ^ (u64{k.type} << 56));
+            }
+        };
+        static std::unordered_map<Key, u64, KeyHash> created;
+        static u64 total{};
+        static auto last = std::chrono::steady_clock::now();
+        ++created[Key{gpu_addr, static_cast<u32>(info.format), info.size.width, info.size.height,
+                      info.size.depth, static_cast<u32>(info.resources.levels),
+                      static_cast<u32>(info.type), info.num_samples,
+                      static_cast<u32>(info.tile_width_spacing)}];
+        ++total;
+        if (const auto now = std::chrono::steady_clock::now();
+            now - last >= std::chrono::seconds{10}) {
+            last = now;
+            std::vector<std::pair<Key, u64>> top(created.begin(), created.end());
+            std::ranges::sort(top, std::greater{}, &std::pair<Key, u64>::second);
+            LOG_INFO(HW_GPU, "TEXCHURN {} images created in 10 s, {} distinct", total,
+                     created.size());
+            for (size_t i = 0; i < std::min<size_t>(top.size(), 10); ++i) {
+                const Key& k = top[i].first;
+                LOG_INFO(HW_GPU,
+                         "TEXCHURN {:6}x addr {:#x} format {} {}x{}x{} levels {} type {} "
+                         "samples {}",
+                         top[i].second, k.addr, k.format, k.width, k.height, k.depth, k.levels,
+                         k.type, k.samples);
+            }
+            created.clear();
+            total = 0;
+        }
+    }
     if (!image_id) {
         return image_id;
     }

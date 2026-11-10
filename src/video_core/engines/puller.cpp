@@ -429,8 +429,22 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         auto& stats = VideoCommon::g_acquire_stats;
-        if (const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
-            without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
+        const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
+        // EXPERIMENT EDEN_PROBE_ACQ_NODRAIN=1: an acquire nothing sent to the word meets yet waits
+        // as a suspended channel right away (latch, polls, the 1 ms valve) instead of draining the
+        // split first, so the front goes on with other channels while the back runs.
+        static const bool no_first_drain = std::getenv("EDEN_PROBE_ACQ_NODRAIN") != nullptr;
+        if (no_first_drain && without_drain == AcquireCheck::NotMet) {
+            auto& waiters = Nx2SemaphoreWaiters::Get();
+            if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
+                device && waiters.Add(this, *device, acquire.value, acquire.operation)) {
+                pending_acquire = acquire;
+                dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
+                return;
+            }
+        }
+        if (without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
             if (without_drain == AcquireCheck::MetByQueued) {
                 // What the front reads after the acquire waits for the work sent before the
                 // release (GpuSplit::NoteSync).

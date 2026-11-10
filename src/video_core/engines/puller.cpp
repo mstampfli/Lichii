@@ -4,8 +4,16 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <map>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <fmt/format.h>
 
 #include "common/assert.h"
 #include "common/logging.h"
@@ -429,8 +437,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         auto& stats = VideoCommon::g_acquire_stats;
-        if (const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
-            without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
+        const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
+        if (without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
             if (without_drain == AcquireCheck::MetByQueued) {
                 // What the front reads after the acquire waits for the work sent before the
                 // release (GpuSplit::NoteSync).
@@ -442,8 +450,50 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Count(stats.drained);
+        // ACQPROBE (not for merging): why the first check drained, and whether the drain helped.
+        // What may write the word, as the front sees it before the drain.
+        const auto probe_device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
+        const auto [probe_noted, probe_any] =
+            probe_device ? VideoCommon::GpuSplit::Get().ProbeQueuedWrites(*probe_device)
+                         : std::pair<bool, bool>{false, false};
         DrainBack();
-        if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+        const bool probe_met = acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address));
+        {
+            struct Probe {
+                std::map<std::string, u64> by_kind;
+                std::unordered_map<u64, u64> by_word;
+                std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            };
+            static Probe probe;
+            const char* const check = without_drain == AcquireCheck::NotMet ? "not met" : "drain";
+            const auto device = probe_device;
+            const char* const writer = probe_noted && probe_any ? "noted+any queued"
+                                       : probe_noted           ? "noted write queued"
+                                       : probe_any             ? "any-write queued"
+                                                               : "nothing queued";
+            ++probe.by_kind[fmt::format("op{} {} {} -> {}", acquire.operation, check, writer,
+                                        probe_met ? "met" : "unmet")];
+            ++probe.by_word[device.value_or(0)];
+            if (const auto now = std::chrono::steady_clock::now(); now - probe.start >= std::chrono::seconds{10}) {
+                std::string kinds;
+                for (const auto& [kind, n] : probe.by_kind) {
+                    kinds += fmt::format(" | {}: {}", kind, n / 10);
+                }
+                std::vector<std::pair<u64, u64>> words;
+                for (const auto& [word, n] : probe.by_word) {
+                    words.emplace_back(n, word);
+                }
+                std::ranges::sort(words, std::greater{});
+                std::string top;
+                for (size_t i = 0; i < std::min<size_t>(words.size(), 6); ++i) {
+                    top += fmt::format(" {:#x}:{}", words[i].second, words[i].first / 10);
+                }
+                LOG_INFO(HW_GPU, "ACQPROBE first-check drains per second{} || {} words, top:{}", kinds,
+                         words.size(), top);
+                probe = Probe{};
+            }
+        }
+        if (probe_met) {
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts

@@ -314,6 +314,12 @@ public:
     /// it yet.
     [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
         u64 device_address) const;
+    /// ACQPROBE: queued writes the back has not consumed that may reach the word: a noted write
+    /// to its granule (first), an entry that may write anywhere (second).
+    [[nodiscard]] std::pair<bool, bool> ProbeQueuedWrites(u64 device_address) const {
+        const u64 done = consumed.load(std::memory_order_acquire);
+        return {DeviceWritesTarget(device_address, 4) > done, last_any_write > done};
+    }
     /// Waits until the back executed the compute and copy work sent before the last NoteSync:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
     /// still queued.
